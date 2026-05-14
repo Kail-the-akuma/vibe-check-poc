@@ -11,14 +11,52 @@ dotenv.config();
  */
 export class SecurityAuditor {
   constructor() {
-    if (!process.env.OPENAI_API_KEY) {
-      console.error('CRITICAL: OPENAI_API_KEY is not defined in .env');
+    this.apiKey = process.env.OPENAI_API_KEY;
+    this.baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    this.model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+    // 🛡️ Security Gate: If you want to restrict the tool to your own key
+    const masterKey = process.env.VIBE_MASTER_KEY;
+    if (masterKey && masterKey !== 'Hugo-The-Architect') {
+      console.warn('⚠️ Warning: Unauthorized master key. Reverting to local user mode.');
+      this.apiKey = null; // Forces the person to use their own key
     }
+
+    if (!this.apiKey && this.baseUrl.includes('openai.com')) {
+      this.showSetupWizard();
+      process.exit(1);
+    }
+
     this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey: this.apiKey || 'not-required-for-local',
+      baseURL: this.baseUrl,
     });
     this.cacheFile = path.resolve(process.cwd(), '.vibe-cache.json');
     this.cache = this.loadCache();
+  }
+
+  showSetupWizard() {
+    console.log('\n' + '='.repeat(50));
+    console.log('🚀 VIBE-CHECK SETUP WIZARD');
+    console.log('='.repeat(50));
+    console.log('\nAPI Key missing! To use VibeCheck, please choose one:');
+    
+    console.log('\nOption A: Use OpenAI (Recommended)');
+    console.log('1. Get a key at https://platform.openai.com/');
+    console.log('2. Add it to .env: OPENAI_API_KEY=your_key_here');
+    
+    console.log('\nOption B: Use Local LLM (Privacy First)');
+    console.log('1. Install Ollama (https://ollama.com/)');
+    console.log('2. Run: ollama run llama3');
+    console.log('3. Add to .env:');
+    console.log('   OPENAI_BASE_URL=http://localhost:11434/v1');
+    console.log('   OPENAI_MODEL=llama3');
+    console.log('   OPENAI_API_KEY=ollama');
+    
+    console.log('\nOption C: Use LM Studio');
+    console.log('1. Open LM Studio and start the Local Server.');
+    console.log('2. Add to .env: OPENAI_BASE_URL=http://localhost:1234/v1');
+    console.log('\n' + '='.repeat(50) + '\n');
   }
 
   loadCache() {
@@ -159,7 +197,7 @@ export class SecurityAuditor {
     - DO NOT include markdown or chat text.`;
 
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: this.model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: content }
