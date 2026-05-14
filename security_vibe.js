@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
@@ -12,48 +13,113 @@ export class SecurityAuditor {
   constructor() {
     if (!process.env.OPENAI_API_KEY) {
       console.error('CRITICAL: OPENAI_API_KEY is not defined in .env');
-    } else {
-      console.log('API Key loaded successfully (length: ' + process.env.OPENAI_API_KEY.length + ')');
     }
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
+    this.cacheFile = path.resolve(process.cwd(), '.vibe-cache.json');
+    this.cache = this.loadCache();
+  }
+
+  loadCache() {
+    try {
+      if (fs.existsSync(this.cacheFile)) {
+        return JSON.parse(fs.readFileSync(this.cacheFile, 'utf-8'));
+      }
+    } catch (e) {
+      console.warn('Could not load cache, starting fresh.');
+    }
+    return {};
+  }
+
+  saveCache() {
+    try {
+      fs.writeFileSync(this.cacheFile, JSON.stringify(this.cache, null, 2));
+    } catch (e) {
+      console.error('Failed to save cache:', e.message);
+    }
+  }
+
+  getHash(content) {
+    return crypto.createHash('md5').update(content).digest('hex');
   }
 
   /**
-   * Analyzes the given code for injections, exposed credentials, and OWASP Top 10 risks.
+   * Cleans code to minimize tokens: strips excessive whitespace and empty lines.
+   */
+  cleanCode(content) {
+    return content
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .join('\n');
+  }
+
+  /**
+   * Analyzes the given code for injections, exposed credentials, and architectural rules.
    * @param {string} content The code content to analyze.
    * @param {string} ext The file extension (to provide context).
+   * @param {string} relativePath The relative path of the file (for architectural context).
    */
-  async analyze(content, ext) {
+  async analyze(content, ext, relativePath) {
     const results = {
       exposedCredentials: [],
       owaspFindings: [],
       overallVibe: 'SAFE',
     };
 
-    // 1. Initial Local Check for Secrets (Fast & Free)
+    // 1. Initial Local Check for Secrets (Comprehensive Regex Suite)
     const secretPatterns = [
-      /(?:apiKey|secret|password|token|connectionString|pwd)\s*[:=]\s*["']([^"']{8,})["']/gi,
-      /[A-Za-z0-9+/]{40}/g,
+      // Generic Keywords
+      { name: 'Generic Secret', regex: /(?:apiKey|secret|password|token|connectionString|pwd|access_key|secret_key|session_token|authorization|db_url)\s*[:=]\s*["']([^"']{8,})["']/gi },
+      
+      // Cloud Providers
+      { name: 'AWS Access Key', regex: /AKIA[0-9A-Z]{16}/g },
+      { name: 'AWS Secret Key', regex: /["']?[A-Za-z0-9/+=]{40}["']?/g }, // Use with caution, can have false positives
+      { name: 'Google Cloud API Key', regex: /AIza[0-9A-Za-z\\-_]{35}/g },
+      
+      // Database Connection Strings
+      { name: 'Postgres Connection String', regex: /postgres:\/\/[^:]+:[^@]+@[^/]+\/[^?\s]+/gi },
+      { name: 'MongoDB Connection String', regex: /mongodb(?:\+srv)?:\/\/[^:]+:[^@]+@[^/]+/gi },
+      { name: 'SQL Server Connection String', regex: /Server=[^;]+;Database=[^;]+;User Id=[^;]+;Password=[^;]+/gi },
+      
+      // Tokens & Others
+      { name: 'Slack Token', regex: /xox[baprs]-[0-9a-zA-Z]{10,48}/g },
+      { name: 'GitHub Token', regex: /gh[pous]_[a-zA-Z0-9]{36}/g },
+      { name: 'Stripe API Key', regex: /sk_live_[0-9a-zA-Z]{24}/g },
+      { name: 'JWT Token', regex: /eyJ[A-Za-z0-9-_]+\.eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+/g },
     ];
 
-    let match;
     for (const pattern of secretPatterns) {
-      while ((match = pattern.exec(content)) !== null) {
+      let match;
+      while ((match = pattern.regex.exec(content)) !== null) {
         results.exposedCredentials.push({
-          type: 'Hardcoded Secret',
+          type: pattern.name,
           value: match[0].trim(),
           line: this.getLineNumber(content, match.index),
         });
       }
     }
 
-    // 2. Real AI OWASP Evaluation
+    // 2. Real AI OWASP Evaluation (with Caching & Optimization)
     try {
-      console.log('--- Calling OpenAI for security check ---');
-      const owaspFindings = await this.evaluateOWASP(content, ext);
-      results.owaspFindings = owaspFindings;
+      const contentHash = this.getHash(content);
+      
+      if (this.cache[contentHash]) {
+        console.log('--- Using cached result for this file ---');
+        results.owaspFindings = this.cache[contentHash];
+      } else {
+        console.log('--- Calling OpenAI for security check ---');
+        const optimizedContent = this.cleanCode(content);
+        const owaspFindings = await this.evaluateOWASP(optimizedContent, ext, relativePath);
+        
+        // Only cache if there's actual data or an empty array (not an error)
+        if (Array.isArray(owaspFindings)) {
+          results.owaspFindings = owaspFindings;
+          this.cache[contentHash] = owaspFindings;
+          this.saveCache();
+        }
+      }
     } catch (error) {
       console.error('--- OpenAI call failed ---');
       console.error('Error Details:', error.message);
@@ -66,13 +132,31 @@ export class SecurityAuditor {
     return results;
   }
 
-  async evaluateOWASP(content, ext) {
+  async evaluateOWASP(content, ext, relativePath) {
     // Keeping tokens minimal with a strict system prompt and short response format
-    const systemPrompt = `You are a security auditor. Analyze the following ${ext} code for OWASP Top 10 vulnerabilities. 
-    Return a JSON object with a key "findings" containing an array of finding objects.
-    Each finding must have: "id" (OWASP ID), "title", "detail" (max 15 words), and "severity" (CRITICAL/HIGH/MEDIUM/LOW). 
-    If no findings, return {"findings": []}. 
-    Do not include any conversational text.`;
+    const systemPrompt = `You are a high-level security and software architect.
+    Analyze the following ${ext} code from the path "${relativePath}".
+    
+    Audit Categories:
+    1. **Security (OWASP/LLM)**: XSS, SQLi, Prompt Injection, Excessive Agency, Secrets.
+    2. **Architecture Rule Enforcement**: Layer boundaries, CQRS, DDD, Domain Isolation.
+    3. **Code Quality & Best Practices**:
+       - **Guard Clauses**: Identify "Arrow Code" (deeply nested ifs). Recommend early returns (Guard Clauses) to improve readability.
+       - **DRY Principle**: Flag repeated logic or code that should be abstracted into a reusable function/class.
+       - **Switch-Case Optimization**: Recommend 'switch' statements for chains of 3+ 'if-else' blocks on the same variable.
+       - **OOP Principles**: Flag procedural code that ignores object-oriented principles (e.g., passing too many primitives instead of an object).
+       - **Naming Conventions**: Ensure classes/files match their role (e.g., Controllers end with 'Controller').
+
+    Output Rules:
+    - Return ONLY a valid JSON object with a "findings" key.
+    - Each finding MUST include: 
+        - "id": (e.g., SEC-XSS, ARCH-LAYER, ARCH-DDD)
+        - "title": Concise name.
+        - "detail": Description (max 15 words).
+        - "severity": (CRITICAL/HIGH/MEDIUM/LOW).
+        - "fix": A concise recommendation or code snippet (max 25 words).
+    - If no issues, return {"findings": []}.
+    - DO NOT include markdown or chat text.`;
 
     const response = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
