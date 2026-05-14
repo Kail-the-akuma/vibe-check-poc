@@ -104,6 +104,11 @@ export class SecurityAuditor {
       exposedCredentials: [],
       owaspFindings: [],
       overallVibe: 'SAFE',
+      summary: {
+        critical: 0,
+        high: 0,
+        medium: 0,
+      }
     };
 
     // 1. Initial Local Check for Secrets (Comprehensive Regex Suite)
@@ -113,7 +118,7 @@ export class SecurityAuditor {
       
       // Cloud Providers
       { name: 'AWS Access Key', regex: /AKIA[0-9A-Z]{16}/g },
-      { name: 'AWS Secret Key', regex: /["']?[A-Za-z0-9/+=]{40}["']?/g }, // Use with caution, can have false positives
+      { name: 'AWS Secret Key', regex: /["']?[A-Za-z0-9/+=]{40}["']?/g }, 
       { name: 'Google Cloud API Key', regex: /AIza[0-9A-Za-z\\-_]{35}/g },
       
       // Database Connection Strings
@@ -135,6 +140,10 @@ export class SecurityAuditor {
           type: pattern.name,
           value: match[0].trim(),
           line: this.getLineNumber(content, match.index),
+          severity: 'CRITICAL',
+          impact: 'Critical data exposure.',
+          remediation: 'Revoke key and move to .env file.',
+          fixCode: `// Use environment variable instead:\nconst key = process.env.${pattern.name.toUpperCase().replace(/\s+/g, '_')};`
         });
       }
     }
@@ -143,7 +152,7 @@ export class SecurityAuditor {
     try {
       const contentHash = this.getHash(content);
       
-      if (this.cache[contentHash]) {
+      if (this.cache[contentHash] && this.cache[contentHash].some(f => f.remediation)) {
         console.log('--- Using cached result for this file ---');
         results.owaspFindings = this.cache[contentHash];
       } else {
@@ -151,7 +160,6 @@ export class SecurityAuditor {
         const optimizedContent = this.cleanCode(content);
         const owaspFindings = await this.evaluateOWASP(optimizedContent, ext, relativePath);
         
-        // Only cache if there's actual data or an empty array (not an error)
         if (Array.isArray(owaspFindings)) {
           results.owaspFindings = owaspFindings;
           this.cache[contentHash] = owaspFindings;
@@ -160,8 +168,30 @@ export class SecurityAuditor {
       }
     } catch (error) {
       console.error('--- OpenAI call failed ---');
-      console.error('Error Details:', error.message);
     }
+
+    // 3. Always calculate summary at the end to ensure consistency
+    const secretLines = new Set(results.exposedCredentials.map(c => c.line));
+    
+    const filteredAI = results.owaspFindings.filter(f => {
+      if (f.id === 'SEC-SECRETS' || f.title?.toLowerCase().includes('secret')) {
+        if (secretLines.has(f.line)) return false; 
+      }
+      return true;
+    });
+
+    results.owaspFindings = filteredAI;
+
+    results.exposedCredentials.forEach(() => results.summary.critical++);
+    results.owaspFindings.forEach(f => {
+      const sev = (f.severity || 'MEDIUM').toUpperCase();
+      const sevLower = sev.toLowerCase();
+      if (results.summary[sevLower] !== undefined) {
+        results.summary[sevLower]++;
+      } else {
+        results.summary.medium++;
+      }
+    });
 
     if (results.exposedCredentials.length > 0 || results.owaspFindings.length > 0) {
       results.overallVibe = 'SUSPICIOUS';
@@ -171,30 +201,26 @@ export class SecurityAuditor {
   }
 
   async evaluateOWASP(content, ext, relativePath) {
-    // Keeping tokens minimal with a strict system prompt and short response format
-    const systemPrompt = `You are a high-level security and software architect.
-    Analyze the following ${ext} code from the path "${relativePath}".
+    const systemPrompt = `You are a strict security architect.
+    Analyze the following ${ext} code at "${relativePath}".
     
-    Audit Categories:
-    1. **Security (OWASP/LLM)**: XSS, SQLi, Prompt Injection, Excessive Agency, Secrets.
-    2. **Architecture Rule Enforcement**: Layer boundaries, CQRS, DDD, Domain Isolation.
-    3. **Code Quality & Best Practices**:
-       - **Guard Clauses**: Identify "Arrow Code" (deeply nested ifs). Recommend early returns (Guard Clauses) to improve readability.
-       - **DRY Principle**: Flag repeated logic or code that should be abstracted into a reusable function/class.
-       - **Switch-Case Optimization**: Recommend 'switch' statements for chains of 3+ 'if-else' blocks on the same variable.
-       - **OOP Principles**: Flag procedural code that ignores object-oriented principles (e.g., passing too many primitives instead of an object).
-       - **Naming Conventions**: Ensure classes/files match their role (e.g., Controllers end with 'Controller').
+    Focus on:
+    1. Security (OWASP/LLM)
+    2. Architecture (DDD/CQRS)
+    3. Code Quality (Guard Clauses, DRY, OOP)
 
     Output Rules:
-    - Return ONLY a valid JSON object with a "findings" key.
-    - Each finding MUST include: 
-        - "id": (e.g., SEC-XSS, ARCH-LAYER, ARCH-DDD)
+    - JSON object with "findings" key.
+    - Each finding: 
+        - "id": string
         - "title": Concise name.
-        - "detail": Description (max 15 words).
-        - "severity": (CRITICAL/HIGH/MEDIUM/LOW).
-        - "fix": A concise recommendation or code snippet (max 25 words).
-    - If no issues, return {"findings": []}.
-    - DO NOT include markdown or chat text.`;
+        - "detail": Max 15 words.
+        - "severity": CRITICAL/HIGH/MEDIUM/LOW
+        - "impact": Max 15 words.
+        - "remediation": Concise fix steps (max 20 words).
+        - "fixCode": One specific code snippet showing the fix.
+        - "line": integer.
+    - KEEP IT BRIEF. No chat, no markdown. Use placeholders for long code.`;
 
     const response = await this.openai.chat.completions.create({
       model: this.model,
@@ -202,16 +228,13 @@ export class SecurityAuditor {
         { role: "system", content: systemPrompt },
         { role: "user", content: content }
       ],
-      temperature: 0.2,
+      temperature: 0.1,
       response_format: { type: "json_object" }
     });
 
-    console.log('OpenAI Call Successful. RequestID:', response.id);
-
     try {
       const parsed = JSON.parse(response.choices[0].message.content);
-      // Handle various JSON wrapper styles if AI returns { findings: [] } or just []
-      return Array.isArray(parsed) ? parsed : (parsed.findings || Object.values(parsed)[0] || []);
+      return parsed.findings || [];
     } catch (e) {
       return [];
     }
