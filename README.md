@@ -64,4 +64,25 @@ node index.js test-files/code-quality-violations.js
 
 ---
 
-*Desenvolvido como uma Prova de Conceito (POC) para demonstrar o poder da IA na garantia de qualidade e segurança em ambientes de desenvolvimento modernos.*
+## 🏆 Conclusões da Prova de Conceito (POC) & O Futuro do VibeCheck
+
+O VibeCheck provou ser uma ferramenta de **valor incalculável** num ambiente de *DevSecOps*. Durante a sua aplicação real (ex: projeto *HomeSync*), demonstrou o poder de detetar *Silent Failures*, vulnerabilidades e problemas de concorrência que frequentemente escapam em revisões de código manuais.
+
+No entanto, a execução desta POC também expôs de forma clara a **maior fraqueza dos Scanners IA puramente baseados em texto: As Alucinações de Sintaxe**.
+
+### O Limite da Análise Textual Pura (LLMs)
+Por não construir uma Árvore de Sintaxe Abstrata (AST) típica dos compiladores ou linters clássicos (ex: ESLint, Babel), a IA opera de forma puramente semântica e por vezes "cega" à estrutura matemática do código:
+- **Falsos Positivos em Cleanups e Try/Catch:** A IA pode ignorar blocos `catch` ou funções de limpeza (ex: `removeChannel` do Supabase) se estiverem escritos de forma ligeiramente diferente do habitual ou dentro de closures/callbacks.
+- **Pedantismo Arquitetural:** Modelos genéricos tendem a sugerir padrões pesados (como Mutex Locks) em ambientes Single-Threaded (como JavaScript/React Native) ou a exigir "encriptação militar" para armazenamento local rudimentar (ex: `AsyncStorage`).
+- **Falsos Segredos:** O pattern-matching de texto pode levar a IA a sinalizar URLs de APIs 100% públicas como se fossem fugas confidenciais de "API Keys".
+
+### O Próximo Nível (A Visão V2)
+Para evoluir de POC para uma ferramenta Enterprise de mercado, o VibeCheck adotará uma **abordagem híbrida**:
+1. **Integração com AST Parsers:** Usar analisadores de sintaxe reais para validar estruturalmente a existência de controlos de fluxo, bloqueando os delírios da IA antes do report final.
+2. **Contexto Estrito & Dual Scoring:** O VibeCheck já implementa um "Modo Tolerante" (*Personal Use Score*) e regras draconianas de contexto explícito para neutralizar o instinto pedante da IA, adequando a análise ao tipo de projeto (Enterprise vs MVP).
+
+**Resumindo:** A inteligência artificial é um auditor genial para detetar falhas lógicas e de segurança que ferramentas tradicionais não apanham, mas precisa de "balizas" sintáticas estritas para evitar "reinventar a roda" em falsos positivos.
+
+---
+
+*Desenvolvido como uma Prova de Conceito (POC) para demonstrar o poder e os desafios da IA na garantia de qualidade e segurança em ambientes de desenvolvimento modernos.*

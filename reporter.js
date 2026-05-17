@@ -29,7 +29,8 @@ export class Reporter {
     const duration = ((Date.now() - this.startTime) / 1000).toFixed(2);
     console.log(chalk.white('Scanned ' + totalFiles + ' files in ' + duration + 's.'));
     const score = this.calculateScore(summary);
-    this.printVibeScore(score);
+    const personalScore = this.calculatePersonalScore(summary);
+    this.printVibeScore(score, personalScore);
   }
 
   getDeduplicatedFindings(results) {
@@ -70,19 +71,34 @@ export class Reporter {
     return Math.max(0, score);
   }
 
-  printVibeScore(score) {
+  calculatePersonalScore(s) {
+    let score = 100;
+    // Personal Use: Ignore medium/low issues. Only penalize criticals heavily, and highs lightly.
+    score -= (s.critical * 25 + s.high * 5);
+    return Math.max(0, score);
+  }
+
+  printVibeScore(score, personalScore) {
     let grade = 'F', color = chalk.red;
     if (score >= 90) grade = 'A', color = chalk.green;
     else if (score >= 80) grade = 'B', color = chalk.greenBright;
     else if (score >= 70) grade = 'C', color = chalk.yellow;
     else if (score >= 60) grade = 'D', color = chalk.yellowBright;
-    console.log(chalk.bold('✨ Overall Vibe Score: ') + color(score + '/100 [Grade ' + grade + ']'));
+    console.log(chalk.bold('✨ Enterprise Vibe Score: ') + color(score + '/100 [Grade ' + grade + ']'));
+
+    let pGrade = 'F', pColor = chalk.red;
+    if (personalScore >= 90) pGrade = 'A', pColor = chalk.green;
+    else if (personalScore >= 80) pGrade = 'B', pColor = chalk.greenBright;
+    else if (personalScore >= 70) pGrade = 'C', pColor = chalk.yellow;
+    else if (personalScore >= 60) pGrade = 'D', pColor = chalk.yellowBright;
+    console.log(chalk.bold('🏠 Personal Use Score:   ') + pColor(personalScore + '/100 [Grade ' + pGrade + ']'));
   }
 
   async generateHTMLReport(results) {
     const findings = this.getDeduplicatedFindings(results);
     const summary = this.getSummaryStats(findings);
     const score = this.calculateScore(summary);
+    const personalScore = this.calculatePersonalScore(summary);
     const reportPath = path.resolve(process.cwd(), 'vibe-report.html');
     
     const html = `<!DOCTYPE html>
@@ -139,7 +155,14 @@ export class Reporter {
         <div class="vibe-score-container">
             <div class="score-circle">${score}</div>
             <div>
-                <h3 style="margin:0">Project Vibe Score</h3>
+                <h3 style="margin:0">Enterprise Vibe Score</h3>
+                <p style="margin:0; font-size: 0.8rem; color: var(--text-secondary);">Strict Security & Architecture</p>
+            </div>
+            
+            <div class="score-circle" style="margin-left: 2rem; border-color: #10b981; color: #10b981;">${personalScore}</div>
+            <div>
+                <h3 style="margin:0; color: #10b981;">Personal Use Score</h3>
+                <p style="margin:0; font-size: 0.8rem; color: var(--text-secondary);">Lenient / MVP Mode</p>
             </div>
         </div>
         <div class="summary-grid">
